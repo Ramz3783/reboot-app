@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    ports: ["8000:8000"]
+    depends_on: [db, redis]
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: reboot
+      POSTGRES_PASSWORD: reboot
+      POSTGRES_DB: reboot
+    volumes: [reboot_db:/var/lib/postgresql/data]
+  redis:
+    image: redis:7-alpine
+volumes:
+  reboot_db:
