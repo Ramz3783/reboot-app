@@ -32,7 +32,7 @@ import java.util.concurrent.TimeUnit
  * needed later, move this call behind a small backend and never ship the key in the client.
  */
 object GroqApi {
-    private val embeddedGroqKey = BuildConfig.GROQ_TEST_KEY {
+    private val embeddedGroqKey = BuildConfig.GROQ_TEST_KEY
 
     private const val BASE_URL = "https://api.groq.com/openai/v1"
 

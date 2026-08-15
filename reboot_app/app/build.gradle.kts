@@ -10,7 +10,7 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        buildConfigField("String", "GROQ_TEST_KEY", "\"\"")
+        buildConfigField("String", "GROQ_TEST_KEY", "\"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\"")
         applicationId = "com.reboot.app"
         minSdk = 26
         targetSdk = 34
