@@ -5,7 +5,6 @@ plugins {
 }
 
 android {
-    buildFeatures { buildConfig = true }
     namespace = "com.reboot.app"
     compileSdk = 34
 
@@ -26,6 +25,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {

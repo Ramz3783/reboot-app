@@ -34,7 +34,6 @@ private enum class VoiceState { IDLE, RECORDING, PROCESSING, DONE }
 
 @Composable
 fun VoiceScreen(
-    apiKey: String,
     model: String,
     onClose: () -> Unit,
 ) {
@@ -76,11 +75,11 @@ fun VoiceScreen(
         state = VoiceState.PROCESSING
         val file = audioFile ?: return
         scope.launch {
-            when (val sttResult = GroqApi.transcribeAudio(apiKey, file)) {
+            when (val sttResult = GroqApi.transcribeAudio(file)) {
                 is GroqApi.Result.Success -> {
                     transcript = sttResult.text
                     val chatResult = GroqApi.chatCompletion(
-                        apiKey, model, MentorMode.MOTIVATOR.systemPrompt,
+                        model, MentorMode.MOTIVATOR.systemPrompt,
                         listOf("user" to sttResult.text)
                     )
                     aiReply = when (chatResult) {

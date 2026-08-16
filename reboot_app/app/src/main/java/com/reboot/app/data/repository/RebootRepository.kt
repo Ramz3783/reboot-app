@@ -8,7 +8,9 @@ import com.reboot.app.data.model.Achievement
 import com.reboot.app.data.model.ChatMessage
 import com.reboot.app.data.model.HabitItem
 import com.reboot.app.data.model.MentorMode
+import com.reboot.app.data.model.OnboardingCatalog
 import com.reboot.app.data.model.PlanItem
+import com.reboot.app.data.model.PlanTemplate
 import com.reboot.app.data.model.TaskItem
 import com.reboot.app.data.model.UserProfile
 import kotlinx.coroutines.flow.Flow
@@ -17,6 +19,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
+import java.time.LocalDate
+import java.time.temporal.ChronoUnit
 
 /**
  * Single source of truth for app state. Everything is persisted locally on-device via
@@ -27,6 +31,8 @@ class RebootRepository(context: Context) {
 
     private val store = PrefsStore(context)
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
+    private fun today(): String = LocalDate.now().toString()
 
     // ---------------- USER PROFILE ----------------
 
@@ -65,6 +71,58 @@ class RebootRepository(context: Context) {
         updateProfile { it.copy(isLoggedIn = false) }
     }
 
+    /**
+     * Runs once whenever the app comes to the foreground (called from Splash). Handles two
+     * things tied to real calendar dates, not app-session state:
+     *  1. "Ударный режим" (streak mode): if the person let a full day pass with the previous
+     *     day's tasks incomplete, the streak resets to 0. Completing all of today's tasks keeps
+     *     extending it — forever, as long as no day is skipped.
+     *  2. Daily task reset: yesterday's checked-off tasks un-check themselves for the new day,
+     *     so the task list is actually usable day after day instead of staying "done" forever.
+     */
+    suspend fun runDailyMaintenance() {
+        val profile = getUserProfileOnce()
+        val todayStr = today()
+        if (profile.lastTaskResetDate == todayStr) return // already handled today
+
+        val daysSinceCredit = if (profile.lastStreakCreditDate.isBlank()) {
+            null
+        } else {
+            ChronoUnit.DAYS.between(LocalDate.parse(profile.lastStreakCreditDate), LocalDate.parse(todayStr))
+        }
+        val brokeStreak = daysSinceCredit != null && daysSinceCredit >= 2
+
+        updateProfile {
+            it.copy(
+                lastTaskResetDate = todayStr,
+                streakDays = if (brokeStreak) 0 else it.streakDays,
+            )
+        }
+
+        // Fresh unchecked tasks for the new day.
+        val current = tasks.first()
+        if (current.isNotEmpty()) {
+            saveTasks(current.map { it.copy(done = false) })
+        }
+        val currentHabits = habits.first()
+        if (currentHabits.isNotEmpty()) {
+            saveHabits(currentHabits.map { it.copy(completedToday = false) })
+        }
+    }
+
+    /**
+     * Called once, right when onboarding finishes. Builds the person's actual task/habit list
+     * from what they picked in the "problems" and "goals" steps, instead of handing everyone
+     * the same 4 generic tasks no matter what they answered.
+     */
+    suspend fun seedFromOnboarding(problems: List<String>, goals: List<String>) {
+        val problemTasks = problems.flatMap { OnboardingCatalog.tasksForProblem(it) }.distinctBy { it.id }
+        val goalHabits = goals.mapNotNull { OnboardingCatalog.habitForGoal(it) }.distinctBy { it.id }
+
+        saveTasks(if (problemTasks.isNotEmpty()) problemTasks else defaultTasks())
+        saveHabits(if (goalHabits.isNotEmpty()) goalHabits else defaultHabits())
+    }
+
     // ---------------- TASKS ----------------
 
     val tasks: Flow<List<TaskItem>> = store.stringFlow(Keys.TASKS).map { raw ->
@@ -86,7 +144,7 @@ class RebootRepository(context: Context) {
             saveTasks(current)
             if (nowDone) {
                 addXp(task.xpReward)
-                bumpStreakIfAllDone(current)
+                creditStreakIfAllDone(current)
             }
         }
     }
@@ -97,17 +155,31 @@ class RebootRepository(context: Context) {
         saveTasks(current)
     }
 
-    private suspend fun bumpStreakIfAllDone(current: List<TaskItem>) {
-        if (current.isNotEmpty() && current.all { it.done }) {
-            updateProfile { it.copy(streakDays = it.streakDays + 1) }
+    /** Adds every task from a template plan (skips titles the person already has). */
+    suspend fun addTasksFromTitles(titles: List<String>, category: String) {
+        val current = tasks.first().toMutableList()
+        val existingTitles = current.map { it.title }.toSet()
+        titles.filter { it !in existingTitles }.forEach { title ->
+            current.add(0, TaskItem(id = "tpl_${title.hashCode()}_${System.currentTimeMillis()}", title = title, xpReward = 35, category = category))
         }
+        saveTasks(current)
+    }
+
+    private suspend fun creditStreakIfAllDone(current: List<TaskItem>) {
+        if (current.isEmpty() || !current.all { it.done }) return
+        val profile = getUserProfileOnce()
+        val todayStr = today()
+        if (profile.lastStreakCreditDate == todayStr) return // already credited today, don't double count
+        updateProfile { it.copy(streakDays = it.streakDays + 1, lastStreakCreditDate = todayStr) }
     }
 
     private fun defaultTasks() = listOf(
-        TaskItem("t1", "Тренировка", xpReward = 80, category = "Спорт", timeLabel = "07:30"),
+        TaskItem("t1", "Тренировка", xpReward = 80, category = "Спорт", timeLabel = "07:30", workoutId = "beginner_full_body"),
         TaskItem("t2", "Прочитать 20 страниц", xpReward = 40, category = "Развитие", timeLabel = "20:00"),
         TaskItem("t3", "Медитация", xpReward = 30, category = "Психология", timeLabel = "21:00"),
         TaskItem("t4", "Без телефона 1 час", xpReward = 50, category = "Дисциплина", timeLabel = "22:00"),
+        TaskItem("t5", "Выпей 2 литра воды", xpReward = 25, category = "Здоровье", timeLabel = "весь день"),
+        TaskItem("t6", "Составь план на завтра", xpReward = 30, category = "Планирование", timeLabel = "22:30"),
     )
 
     // ---------------- HABITS ----------------
@@ -133,12 +205,20 @@ class RebootRepository(context: Context) {
         }
     }
 
+    suspend fun addHabit(habit: HabitItem) {
+        val current = habits.first().toMutableList()
+        current.add(0, habit)
+        saveHabits(current)
+    }
+
     private fun defaultHabits() = listOf(
-        HabitItem("h1", "Тренировка", streak = 5),
-        HabitItem("h2", "Чтение", streak = 5),
-        HabitItem("h3", "Медитация", streak = 3),
-        HabitItem("h4", "Ранний подъём", streak = 2),
+        HabitItem("h1", "Тренировка", streak = 0),
+        HabitItem("h2", "Чтение", streak = 0),
+        HabitItem("h3", "Медитация", streak = 0),
+        HabitItem("h4", "Ранний подъём", streak = 0),
         HabitItem("h5", "Без сахара", streak = 0),
+        HabitItem("h6", "2 литра воды", streak = 0),
+        HabitItem("h7", "Без соцсетей после 22:00", streak = 0),
     )
 
     // ---------------- PLANS ----------------
@@ -146,6 +226,30 @@ class RebootRepository(context: Context) {
     val plans: Flow<List<PlanItem>> = store.stringFlow(Keys.PLANS).map { raw ->
         if (raw.isBlank()) defaultPlans() else runCatching { json.decodeFromString<List<PlanItem>>(raw) }
             .getOrDefault(defaultPlans())
+    }
+
+    suspend fun savePlans(items: List<PlanItem>) {
+        store.putString(Keys.PLANS, json.encodeToString(items))
+    }
+
+    /** "Шаблоны" tab action: adds a template to "Мои планы" and seeds its tasks. */
+    suspend fun applyTemplate(template: PlanTemplate) {
+        val current = plans.first().toMutableList()
+        if (current.none { it.id == template.id }) {
+            current.add(
+                0,
+                PlanItem(
+                    id = template.id,
+                    title = template.title,
+                    category = template.category,
+                    progressPercent = 0,
+                    totalTasks = template.taskTitles.size,
+                    icon = template.icon,
+                )
+            )
+            savePlans(current)
+        }
+        addTasksFromTitles(template.taskTitles, template.title)
     }
 
     private fun defaultPlans() = listOf(
@@ -164,10 +268,14 @@ class RebootRepository(context: Context) {
     }
 
     private fun defaultAchievements() = listOf(
-        Achievement("a1", "7 дней подряд", "Выполняй задачи 7 дней подряд", true),
-        Achievement("a2", "Ранняя пташка", "Просыпайся до 7:00 5 дней", true),
-        Achievement("a3", "Читатель", "Прочитай 5 книг", true),
-        Achievement("a4", "Без телефона", "3 часа без телефона", false),
+        Achievement("a1", "Первый шаг", "Заверши свою первую задачу", false),
+        Achievement("a2", "7 дней подряд", "Выполняй все задачи 7 дней подряд", false),
+        Achievement("a3", "30 дней подряд", "Держи серию месяц без пропусков", false),
+        Achievement("a4", "Ранняя пташка", "Просыпайся до 7:00 5 дней", false),
+        Achievement("a5", "Читатель", "Прочитай 5 книг", false),
+        Achievement("a6", "Без телефона", "Продержись 3 часа без телефона", false),
+        Achievement("a7", "Спортсмен", "Заверши 10 тренировок", false),
+        Achievement("a8", "Мастер фокуса", "Заверши 10 фокус-сессий", false),
     )
 
     // ---------------- CHAT HISTORY (per mentor mode) ----------------
@@ -186,11 +294,10 @@ class RebootRepository(context: Context) {
     }
 
     // ---------------- SETTINGS ----------------
+    // Note: the Groq API key itself is baked in at build time (BuildConfig, see GroqApi.kt) —
+    // it is intentionally NOT stored here or editable from Settings.
 
-    val groqApiKey: Flow<String> = store.stringFlow(Keys.GROQ_API_KEY)
-    suspend fun setGroqApiKey(key: String) = store.putString(Keys.GROQ_API_KEY, key)
-
-    val groqModel: Flow<String> = store.stringFlow(Keys.GROQ_MODEL, default = "openai/gpt-oss-20b")
+    val groqModel: Flow<String> = store.stringFlow(Keys.GROQ_MODEL, default = "llama-3.3-70b-versatile")
     suspend fun setGroqModel(model: String) = store.putString(Keys.GROQ_MODEL, model)
 
     val silentMode: Flow<Boolean> = store.boolFlow(Keys.SILENT_MODE)

@@ -27,7 +27,6 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun MentorScreen(
-    apiKey: String,
     model: String,
     onOpenVoice: () -> Unit,
     getHistory: (MentorMode) -> kotlinx.coroutines.flow.Flow<List<ChatMessage>>,
@@ -41,7 +40,6 @@ fun MentorScreen(
         val mode = selectedMode!!
         ChatScreen(
             mode = mode,
-            apiKey = apiKey,
             model = model,
             history = getHistory(mode),
             onBack = { selectedMode = null },
@@ -86,7 +84,6 @@ private fun ModeSelectScreen(onSelect: (MentorMode) -> Unit) {
 @Composable
 private fun ChatScreen(
     mode: MentorMode,
-    apiKey: String,
     model: String,
     history: kotlinx.coroutines.flow.Flow<List<ChatMessage>>,
     onBack: () -> Unit,
@@ -165,7 +162,7 @@ private fun ChatScreen(
                                     val userMsg = ChatMessage("user", text)
                                     onSendMessage(userMsg)
                                     val historyPairs = (messages + userMsg).takeLast(20).map { it.role to it.content }
-                                    val result = GroqApi.chatCompletion(apiKey, model, mode.systemPrompt, historyPairs)
+                                    val result = GroqApi.chatCompletion(model, mode.systemPrompt, historyPairs)
                                     when (result) {
                                         is GroqApi.Result.Success -> onSendMessage(ChatMessage("assistant", result.text))
                                         is GroqApi.Result.Failure -> errorText = result.message

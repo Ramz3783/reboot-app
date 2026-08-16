@@ -6,6 +6,7 @@ object Routes {
     const val REGISTER = "register"
     const val ONBOARD_PROBLEMS = "onboard_problems"
     const val ONBOARD_GOALS = "onboard_goals"
+    const val ONBOARD_THINKING = "onboard_thinking"
     const val ONBOARD_PROFILE = "onboard_profile"
 
     const val HOME = "home"
@@ -21,4 +22,6 @@ object Routes {
     const val FOCUS = "focus"
     const val SETTINGS = "settings"
     const val PRO = "pro"
+    const val WORKOUT = "workout/{workoutId}"
+    fun workoutRoute(workoutId: String) = "workout/$workoutId"
 }

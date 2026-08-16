@@ -4,8 +4,6 @@ import com.reboot.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
@@ -23,19 +21,18 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
- * Talks directly to Groq's OpenAI-compatible API from the Android client.
- * Base URL: https://api.groq.com/openai/v1
- *
- * IMPORTANT: This project has no backend server (per requirements). That means the Groq
- * API key is stored locally on-device (DataStore) and sent from the client, entered by the
- * user themselves in Settings. This is NOT the same as hardcoding a key into the APK at
- * build time, but it is still less secure than a server-side proxy. If real security is
- * needed later, move this call behind a small backend and never ship the key in the client.
+ * Talks directly to Groq's OpenAI-compatible API from the Android client, using a key
+ * embedded at build time via BuildConfig (set in app/build.gradle.kts). No manual entry,
+ * no backend server. The key is baked into the APK, which is fine for a private/personal
+ * key with a free-tier budget, but anyone who decompiles the APK can read it.
  */
 object GroqApi {
-    private val embeddedGroqKey = BuildConfig.GROQ_TEST_KEY
 
+    private val KEY = BuildConfig.GROQ_TEST_KEY
     private const val BASE_URL = "https://api.groq.com/openai/v1"
+
+    // Short, chat-like answers by default — this is a phone chat screen, not an essay.
+    private const val MAX_TOKENS = 220
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -50,13 +47,12 @@ object GroqApi {
     }
 
     suspend fun chatCompletion(
-        apiKey: String = embeddedGroqKey,
         model: String,
         systemPrompt: String,
         history: List<Pair<String, String>>, // role to content
     ): Result = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) {
-            return@withContext Result.Failure("Groq API key не задан. Открой Настройки и вставь свой ключ с console.groq.com.")
+        if (KEY.isBlank()) {
+            return@withContext Result.Failure("AI временно недоступен (нет ключа в сборке).")
         }
         try {
             val messages = buildJsonArray {
@@ -74,13 +70,13 @@ object GroqApi {
             val bodyJson = buildJsonObject {
                 put("model", JsonPrimitive(model))
                 put("messages", messages)
-                put("temperature", JsonPrimitive(0.8))
-                put("max_tokens", JsonPrimitive(600))
+                put("temperature", JsonPrimitive(0.7))
+                put("max_tokens", JsonPrimitive(MAX_TOKENS))
             }
             val body = bodyJson.toString().toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
                 .url("$BASE_URL/chat/completions")
-                .addHeader("Authorization", "Bearer $embeddedGroqKey")
+                .addHeader("Authorization", "Bearer $KEY")
                 .post(body)
                 .build()
 
@@ -107,9 +103,9 @@ object GroqApi {
     }
 
     /** Sends a recorded audio file to Groq's Whisper STT endpoint and returns the transcript. */
-    suspend fun transcribeAudio(apiKey: String = embeddedGroqKey, file: File, sttModel: String = "whisper-large-v3-turbo"): Result =
+    suspend fun transcribeAudio(file: File, sttModel: String = "whisper-large-v3-turbo"): Result =
         withContext(Dispatchers.IO) {
-            if (apiKey.isBlank()) return@withContext Result.Failure("Groq API key не задан. Открой Настройки.")
+            if (KEY.isBlank()) return@withContext Result.Failure("AI временно недоступен (нет ключа в сборке).")
             try {
                 val requestBody = MultipartBody.Builder()
                     .setType(MultipartBody.FORM)
@@ -121,7 +117,7 @@ object GroqApi {
                     .build()
                 val request = Request.Builder()
                     .url("$BASE_URL/audio/transcriptions")
-                    .addHeader("Authorization", "Bearer $embeddedGroqKey")
+                    .addHeader("Authorization", "Bearer $KEY")
                     .post(requestBody)
                     .build()
                 client.newCall(request).execute().use { resp ->
@@ -138,28 +134,4 @@ object GroqApi {
                 Result.Failure("Ошибка сети: ${e.message}")
             }
         }
-
-    /** List currently available models from Groq, so GROQ_MODEL is validated, not hardcoded forever. */
-    suspend fun listModels(apiKey: String = embeddedGroqKey): Result = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) return@withContext Result.Failure("Groq API key не задан.")
-        try {
-            val request = Request.Builder()
-                .url("$BASE_URL/models")
-                .addHeader("Authorization", "Bearer $embeddedGroqKey")
-                .get()
-                .build()
-            client.newCall(request).execute().use { resp ->
-                val respBody = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) return@withContext Result.Failure("Ошибка (${resp.code})")
-                val ids = runCatching {
-                    json.parseToJsonElement(respBody).jsonObject["data"]?.jsonArray
-                        ?.mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.content }
-                        ?.joinToString(", ")
-                }.getOrNull() ?: "?"
-                Result.Success(ids)
-            }
-        } catch (e: Exception) {
-            Result.Failure("Ошибка сети: ${e.message}")
-        }
-    }
 }

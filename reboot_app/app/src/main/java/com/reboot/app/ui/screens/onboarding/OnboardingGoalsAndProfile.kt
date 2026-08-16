@@ -20,20 +20,27 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.reboot.app.data.model.OnboardingCatalog
 import com.reboot.app.ui.theme.*
 
 private data class GoalOption(val label: String, val icon: ImageVector)
 
-private val GOALS = listOf(
-    GoalOption("Тренировки", Icons.Filled.FitnessCenter),
-    GoalOption("Чтение", Icons.Filled.MenuBook),
-    GoalOption("Медитация", Icons.Filled.SelfImprovement),
-    GoalOption("Ранний подъём", Icons.Filled.WbSunny),
-    GoalOption("Правильное питание", Icons.Filled.Restaurant),
-    GoalOption("Обучение", Icons.Filled.School),
-    GoalOption("Дисциплина", Icons.Filled.CheckCircle),
-    GoalOption("Фокус", Icons.Filled.CenterFocusStrong),
+private val GOAL_ICONS: Map<String, ImageVector> = mapOf(
+    "Тренировки" to Icons.Filled.FitnessCenter,
+    "Чтение" to Icons.Filled.MenuBook,
+    "Медитация" to Icons.Filled.SelfImprovement,
+    "Ранний подъём" to Icons.Filled.WbSunny,
+    "Правильное питание" to Icons.Filled.Restaurant,
+    "Обучение" to Icons.Filled.School,
+    "Дисциплина" to Icons.Filled.CheckCircle,
+    "Фокус" to Icons.Filled.CenterFocusStrong,
+    "Больше воды" to Icons.Filled.WaterDrop,
+    "Меньше соцсетей" to Icons.Filled.PhonelinkErase,
+    "Ведение дневника" to Icons.Filled.Edit,
+    "Планирование дня" to Icons.Filled.EventNote,
 )
+
+private val GOALS = OnboardingCatalog.GOALS.map { GoalOption(it, GOAL_ICONS[it] ?: Icons.Filled.Star) }
 
 @Composable
 fun OnboardingGoalsScreen(

@@ -14,13 +14,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.reboot.app.data.model.OnboardingCatalog
 import com.reboot.app.ui.theme.*
 
-private val PROBLEMS = listOf(
-    "Прокрастинация", "Нет мотивации", "Зависимость от телефона",
-    "Плохие привычки", "Низкая уверенность", "Тревожность / Стресс",
-    "Лень", "Нерегулярный сон"
-)
+private val PROBLEMS = OnboardingCatalog.PROBLEMS
 
 @Composable
 fun OnboardingProblemsScreen(

@@ -17,18 +17,25 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.reboot.app.data.model.UserProfile
 import com.reboot.app.ui.theme.*
 import kotlinx.coroutines.delay
 
+/**
+ * onCheckStatus is a suspend function that goes straight to the repository (DataStore) and
+ * returns the REAL, up-to-date (loggedIn, onboarded) state. We deliberately do NOT read this
+ * from a Composable state / collectAsState default here, because that default value races
+ * against the async DataStore read on cold start and can incorrectly look "logged out" right
+ * after a fresh app launch (the bug where registration seemed to reset after closing the app).
+ */
 @Composable
 fun SplashScreen(
-    profile: UserProfile,
-    onFinished: (loggedIn: Boolean, onboarded: Boolean) -> Unit,
+    onCheckStatus: suspend () -> Pair<Boolean, Boolean>,
+    onNavigate: (loggedIn: Boolean, onboarded: Boolean) -> Unit,
 ) {
     LaunchedEffect(Unit) {
-        delay(1200)
-        onFinished(profile.isLoggedIn, profile.isOnboarded)
+        val (loggedIn, onboarded) = onCheckStatus()
+        delay(700) // small delay purely so the splash branding is visible, not for correctness
+        onNavigate(loggedIn, onboarded)
     }
     Box(
         modifier = Modifier

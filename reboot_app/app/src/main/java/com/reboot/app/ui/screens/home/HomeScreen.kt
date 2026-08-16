@@ -6,6 +6,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.FitnessCenter
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MonetizationOn
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
@@ -29,6 +30,7 @@ fun HomeScreen(
     profile: UserProfile,
     tasks: List<TaskItem>,
     onToggleTask: (String) -> Unit,
+    onOpenWorkout: (String) -> Unit,
     onSeeAllTasks: () -> Unit,
 ) {
     Box(Modifier.fillMaxSize().background(BgDeep)) {
@@ -72,7 +74,7 @@ fun HomeScreen(
                     }
                     Spacer(Modifier.height(16.dp))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        StatMini("Серия", "${profile.streakDays} дней")
+                        StatMini("🔥 Ударный режим", "${profile.streakDays} дней")
                         StatMini("Задачи", "${tasks.count { it.done }} / ${tasks.size}")
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.MonetizationOn, null, tint = AccentGold, modifier = Modifier.size(16.dp))
@@ -89,8 +91,17 @@ fun HomeScreen(
                 Text("Сегодня", color = AccentViolet, fontSize = 13.sp, modifier = Modifier.clickableNoRipple(onSeeAllTasks))
             }
             Spacer(Modifier.height(12.dp))
+            if (tasks.isEmpty()) {
+                Text(
+                    "Пока нет задач — они появятся из выбранных тобой целей, или добавь свою через +",
+                    color = TextTertiary, fontSize = 13.sp
+                )
+            }
             tasks.forEach { task ->
-                TaskRow(task) { onToggleTask(task.id) }
+                TaskRow(task) {
+                    if (task.workoutId != null && !task.done) onOpenWorkout(task.workoutId)
+                    else onToggleTask(task.id)
+                }
                 Spacer(Modifier.height(10.dp))
             }
             Spacer(Modifier.height(90.dp))
@@ -112,21 +123,29 @@ private fun StatMini(label: String, value: String) {
 }
 
 @Composable
-fun TaskRow(task: TaskItem, onToggle: () -> Unit) {
+fun TaskRow(task: TaskItem, onTap: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(CardDark)
-            .clickableNoRipple(onToggle)
+            .clickableNoRipple(onTap)
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            if (task.done) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
-            null,
-            tint = if (task.done) AccentGreen else TextTertiary
-        )
+        if (task.workoutId != null) {
+            Icon(
+                if (task.done) Icons.Filled.CheckCircle else Icons.Filled.FitnessCenter,
+                null,
+                tint = if (task.done) AccentGreen else AccentCyan
+            )
+        } else {
+            Icon(
+                if (task.done) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
+                null,
+                tint = if (task.done) AccentGreen else TextTertiary
+            )
+        }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
@@ -135,8 +154,12 @@ fun TaskRow(task: TaskItem, onToggle: () -> Unit) {
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Medium
             )
-            if (task.timeLabel.isNotBlank()) {
-                Text(task.timeLabel, color = TextTertiary, fontSize = 11.sp)
+            val subtitle = listOfNotNull(
+                task.timeLabel.takeIf { it.isNotBlank() },
+                if (task.workoutId != null && !task.done) "Нажми, чтобы начать тренировку" else null
+            ).joinToString(" · ")
+            if (subtitle.isNotBlank()) {
+                Text(subtitle, color = TextTertiary, fontSize = 11.sp)
             }
         }
         Text("+${task.xpReward} XP", color = AccentCyan, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
