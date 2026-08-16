@@ -5,11 +5,14 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.FitnessCenter
+import androidx.compose.material.icons.filled.LocalFireDepartment
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MonetizationOn
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -23,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.reboot.app.data.model.TaskItem
 import com.reboot.app.data.model.UserProfile
+import com.reboot.app.data.model.VerificationType
 import com.reboot.app.ui.theme.*
 
 @Composable
@@ -31,8 +35,13 @@ fun HomeScreen(
     tasks: List<TaskItem>,
     onToggleTask: (String) -> Unit,
     onOpenWorkout: (String) -> Unit,
+    onOpenTimerVerification: (String) -> Unit,
+    onOpenPhotoVerification: (String) -> Unit,
     onSeeAllTasks: () -> Unit,
 ) {
+    val regularTasks = tasks.filterNot { it.isDailyChallenge }
+    val challenge = tasks.firstOrNull { it.isDailyChallenge }
+
     Box(Modifier.fillMaxSize().background(BgDeep)) {
         Column(
             Modifier
@@ -58,7 +67,7 @@ fun HomeScreen(
                             Spacer(Modifier.width(10.dp))
                             Text("Прогресс за сегодня", color = TextSecondary, fontSize = 13.sp)
                         }
-                        Text("${progressPercent(tasks)}%", color = AccentGreen, fontWeight = FontWeight.Bold)
+                        Text("${progressPercent(regularTasks)}%", color = AccentGreen, fontWeight = FontWeight.Bold)
                     }
                     Spacer(Modifier.height(14.dp))
                     Text("Уровень ${profile.level}", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -73,15 +82,34 @@ fun HomeScreen(
                         )
                     }
                     Spacer(Modifier.height(16.dp))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        StatMini("🔥 Ударный режим", "${profile.streakDays} дней")
-                        StatMini("Задачи", "${tasks.count { it.done }} / ${tasks.size}")
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.LocalFireDepartment, null, tint = streakColor(profile.streakDays), modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Column {
+                                Text("${profile.streakDays} дней", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                Text(
+                                    if (profile.streakFreezes > 0) "❄ заморозок: ${profile.streakFreezes}" else "серия",
+                                    color = TextTertiary, fontSize = 10.sp
+                                )
+                            }
+                        }
+                        StatMini("Задачи", "${regularTasks.count { it.done }} / ${regularTasks.size}")
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.MonetizationOn, null, tint = AccentGold, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
                             Text("${profile.coins}", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                         }
                     }
+                    Spacer(Modifier.height(14.dp))
+                    WeekDots(daysCompleted = profile.daysCompletedThisWeek)
+                }
+            }
+
+            if (challenge != null) {
+                Spacer(Modifier.height(16.dp))
+                DailyChallengeCard(challenge) {
+                    routeTaskTap(challenge, onToggleTask, onOpenWorkout, onOpenTimerVerification, onOpenPhotoVerification)
                 }
             }
 
@@ -91,16 +119,15 @@ fun HomeScreen(
                 Text("Сегодня", color = AccentViolet, fontSize = 13.sp, modifier = Modifier.clickableNoRipple(onSeeAllTasks))
             }
             Spacer(Modifier.height(12.dp))
-            if (tasks.isEmpty()) {
+            if (regularTasks.isEmpty()) {
                 Text(
                     "Пока нет задач — они появятся из выбранных тобой целей, или добавь свою через +",
                     color = TextTertiary, fontSize = 13.sp
                 )
             }
-            tasks.forEach { task ->
+            regularTasks.forEach { task ->
                 TaskRow(task) {
-                    if (task.workoutId != null && !task.done) onOpenWorkout(task.workoutId)
-                    else onToggleTask(task.id)
+                    routeTaskTap(task, onToggleTask, onOpenWorkout, onOpenTimerVerification, onOpenPhotoVerification)
                 }
                 Spacer(Modifier.height(10.dp))
             }
@@ -109,9 +136,77 @@ fun HomeScreen(
     }
 }
 
+private fun routeTaskTap(
+    task: TaskItem,
+    onToggleTask: (String) -> Unit,
+    onOpenWorkout: (String) -> Unit,
+    onOpenTimerVerification: (String) -> Unit,
+    onOpenPhotoVerification: (String) -> Unit,
+) {
+    if (task.done) return
+    when {
+        task.workoutId != null -> onOpenWorkout(task.workoutId)
+        task.verificationType == VerificationType.TIMER -> onOpenTimerVerification(task.id)
+        task.verificationType == VerificationType.PHOTO -> onOpenPhotoVerification(task.id)
+        else -> onToggleTask(task.id)
+    }
+}
+
 private fun progressPercent(tasks: List<TaskItem>): Int {
     if (tasks.isEmpty()) return 0
     return (tasks.count { it.done } * 100) / tasks.size
+}
+
+fun streakColor(days: Int): Color = when {
+    days >= 100 -> AccentPurple
+    days >= 30 -> AccentPink
+    days >= 7 -> AccentGold
+    else -> AccentCyan
+}
+
+@Composable
+private fun WeekDots(daysCompleted: Int) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        repeat(7) { i ->
+            Box(
+                Modifier
+                    .weight(1f)
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(if (i < daysCompleted) AccentGreen else CardLight)
+            )
+        }
+    }
+}
+
+@Composable
+private fun DailyChallengeCard(task: TaskItem, onTap: () -> Unit) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(Brush.horizontalGradient(listOf(AccentGold.copy(alpha = 0.18f), AccentPink.copy(alpha = 0.18f))))
+            .clickableNoRipple(onTap)
+            .padding(16.dp)
+    ) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("🎲 Челлендж дня", color = AccentGold, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(8.dp))
+                Text("x2 XP", color = TextTertiary, fontSize = 11.sp)
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                task.title,
+                color = if (task.done) TextTertiary else TextPrimary,
+                fontSize = 15.sp, fontWeight = FontWeight.SemiBold
+            )
+            if (task.done) {
+                Spacer(Modifier.height(4.dp))
+                Text("Выполнено ✓", color = AccentGreen, fontSize = 12.sp)
+            }
+        }
+    }
 }
 
 @Composable
@@ -133,19 +228,19 @@ fun TaskRow(task: TaskItem, onTap: () -> Unit) {
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (task.workoutId != null) {
-            Icon(
-                if (task.done) Icons.Filled.CheckCircle else Icons.Filled.FitnessCenter,
-                null,
-                tint = if (task.done) AccentGreen else AccentCyan
-            )
-        } else {
-            Icon(
-                if (task.done) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
-                null,
-                tint = if (task.done) AccentGreen else TextTertiary
-            )
+        val icon = when {
+            task.done -> Icons.Filled.CheckCircle
+            task.workoutId != null -> Icons.Filled.FitnessCenter
+            task.verificationType == VerificationType.TIMER -> Icons.Filled.Timer
+            task.verificationType == VerificationType.PHOTO -> Icons.Filled.CameraAlt
+            else -> Icons.Filled.RadioButtonUnchecked
         }
+        val tint = when {
+            task.done -> AccentGreen
+            task.workoutId != null || task.verificationType != VerificationType.NONE -> AccentCyan
+            else -> TextTertiary
+        }
+        Icon(icon, null, tint = tint)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
@@ -154,10 +249,14 @@ fun TaskRow(task: TaskItem, onTap: () -> Unit) {
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Medium
             )
-            val subtitle = listOfNotNull(
-                task.timeLabel.takeIf { it.isNotBlank() },
-                if (task.workoutId != null && !task.done) "Нажми, чтобы начать тренировку" else null
-            ).joinToString(" · ")
+            val hint = when {
+                task.done -> null
+                task.workoutId != null -> "Нажми, чтобы начать тренировку"
+                task.verificationType == VerificationType.TIMER -> "Таймер ${task.durationMinutes} мин — нельзя просто отметить"
+                task.verificationType == VerificationType.PHOTO -> "Нужно фото-доказательство"
+                else -> null
+            }
+            val subtitle = listOfNotNull(task.timeLabel.takeIf { it.isNotBlank() }, hint).joinToString(" · ")
             if (subtitle.isNotBlank()) {
                 Text(subtitle, color = TextTertiary, fontSize = 11.sp)
             }

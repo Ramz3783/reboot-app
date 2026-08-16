@@ -88,6 +88,11 @@ fun WorkoutScreen(
                 Spacer(Modifier.height(24.dp))
                 GradientButton(text = "Готово") { onCompleted() }
             } else {
+                ExerciseAnimationView(
+                    animation = exercise.animation,
+                    modifier = Modifier.align(Alignment.CenterHorizontally).size(140.dp)
+                )
+                Spacer(Modifier.height(16.dp))
                 Text(
                     exercise.name, color = TextPrimary, fontSize = 26.sp, fontWeight = FontWeight.Bold,
                     modifier = Modifier.align(Alignment.CenterHorizontally)

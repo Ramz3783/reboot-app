@@ -1,29 +1,42 @@
 package com.reboot.app
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.reboot.app.data.model.ChatMessage
+import com.reboot.app.data.model.MentorMode
 import com.reboot.app.data.model.UserProfile
 import com.reboot.app.data.model.WorkoutCatalog
+import com.reboot.app.data.remote.GroqApi
 import com.reboot.app.data.repository.RebootRepository
 import com.reboot.app.navigation.Routes
 import com.reboot.app.ui.screens.achievements.AchievementsScreen
 import com.reboot.app.ui.screens.auth.LoginScreen
 import com.reboot.app.ui.screens.auth.RegisterScreen
+import com.reboot.app.ui.screens.celebration.LevelUpOverlay
+import com.reboot.app.ui.screens.celebration.StreakMilestoneOverlay
 import com.reboot.app.ui.screens.createtask.CreateTaskScreen
 import com.reboot.app.ui.screens.focus.FocusScreen
 import com.reboot.app.ui.screens.habits.HabitsScreen
@@ -39,10 +52,13 @@ import com.reboot.app.ui.screens.progress.ProgressScreen
 import com.reboot.app.ui.screens.pro.ProScreen
 import com.reboot.app.ui.screens.settings.SettingsScreen
 import com.reboot.app.ui.screens.splash.SplashScreen
+import com.reboot.app.ui.screens.verification.PhotoVerificationScreen
+import com.reboot.app.ui.screens.verification.TimerVerificationScreen
 import com.reboot.app.ui.screens.voice.VoiceScreen
 import com.reboot.app.ui.screens.workout.WorkoutScreen
 import com.reboot.app.ui.theme.RebootBottomBar
 import com.reboot.app.ui.theme.RebootTheme
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -59,10 +75,41 @@ class MainActivity : ComponentActivity() {
 
 private val mainTabRoutes = setOf(Routes.HOME, Routes.PLANS, Routes.MENTOR, Routes.PROFILE)
 
+/** Builds a one-off proactive AI message (morning briefing or evening recap) and appends it
+ * to that mode's chat as if the coach started the conversation. Never persists the synthetic
+ * instruction itself — only the assistant's reply. */
+private suspend fun maybeSendProactiveMessage(repository: RebootRepository, model: String, mode: MentorMode) {
+    val profile = repository.getUserProfileOnce()
+    val allTasks = repository.tasks.first()
+    val done = allTasks.count { it.done }
+    val total = allTasks.size
+
+    if (repository.shouldShowMorningBriefing()) {
+        repository.markMorningBriefingShown()
+        val prompt = "Ты сам начинаешь разговор, как только пользователь открыл приложение утром. " +
+            "Его серия: ${profile.streakDays} дней, уровень ${profile.level}, задач на сегодня: $total. " +
+            "Поприветствуй его коротко (2-3 предложения) и замотивируй начать день, в своём стиле."
+        val result = GroqApi.chatCompletion(model, mode.systemPrompt, listOf("user" to prompt))
+        if (result is GroqApi.Result.Success) {
+            repository.appendChatMessage(mode, ChatMessage("assistant", result.text))
+        }
+    } else if (repository.shouldShowEveningRecap() && total > 0 && done < total) {
+        repository.markEveningRecapShown()
+        val prompt = "Сейчас вечер. Из $total задач на сегодня выполнено только $done. " +
+            "Серия: ${profile.streakDays} дней. Коротко (2-3 предложения) мягко подтолкни закрыть " +
+            "оставшиеся задачи, в своём стиле."
+        val result = GroqApi.chatCompletion(model, mode.systemPrompt, listOf("user" to prompt))
+        if (result is GroqApi.Result.Success) {
+            repository.appendChatMessage(mode, ChatMessage("assistant", result.text))
+        }
+    }
+}
+
 @Composable
 fun RebootNavGraph(repository: RebootRepository) {
     val navController = rememberNavController()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     val profile by repository.userProfile.collectAsState(initial = UserProfile())
     val tasks by repository.tasks.collectAsState(initial = emptyList())
@@ -72,6 +119,18 @@ fun RebootNavGraph(repository: RebootRepository) {
     val model by repository.groqModel.collectAsState(initial = "llama-3.3-70b-versatile")
     val notifications by repository.notificationsEnabled.collectAsState(initial = true)
     val silentMode by repository.silentMode.collectAsState(initial = false)
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* no-op either way, worker checks again before posting */ }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+            if (!granted) notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route ?: Routes.SPLASH
@@ -100,6 +159,7 @@ fun RebootNavGraph(repository: RebootRepository) {
                     SplashScreen(
                         onCheckStatus = {
                             repository.runDailyMaintenance()
+                            repository.refreshAchievements()
                             val p = repository.getUserProfileOnce()
                             p.isLoggedIn to p.isOnboarded
                         },
@@ -193,8 +253,19 @@ fun RebootNavGraph(repository: RebootRepository) {
                         tasks = tasks,
                         onToggleTask = { id -> scope.launch { repository.toggleTask(id) } },
                         onOpenWorkout = { workoutId -> navController.navigate(Routes.workoutRoute(workoutId)) },
+                        onOpenTimerVerification = { taskId -> navController.navigate(Routes.timerVerifyRoute(taskId)) },
+                        onOpenPhotoVerification = { taskId -> navController.navigate(Routes.photoVerifyRoute(taskId)) },
                         onSeeAllTasks = { }
                     )
+                    if (profile.pendingMilestone > 0) {
+                        StreakMilestoneOverlay(days = profile.pendingMilestone) {
+                            scope.launch { repository.clearPendingMilestone() }
+                        }
+                    } else if (profile.pendingLevelUp) {
+                        LevelUpOverlay(newLevel = profile.level) {
+                            scope.launch { repository.clearPendingLevelUp() }
+                        }
+                    }
                 }
 
                 composable(Routes.PLANS) {
@@ -210,7 +281,8 @@ fun RebootNavGraph(repository: RebootRepository) {
                         model = model,
                         onOpenVoice = { navController.navigate(Routes.VOICE) },
                         getHistory = { mode -> repository.chatHistory(mode) },
-                        onSendMessage = { mode, msg -> repository.appendChatMessage(mode, msg) }
+                        onSendMessage = { mode, msg -> repository.appendChatMessage(mode, msg) },
+                        onEnterChat = { mode -> maybeSendProactiveMessage(repository, model, mode) },
                     )
                 }
 
@@ -272,6 +344,47 @@ fun RebootNavGraph(repository: RebootRepository) {
                                 scope.launch {
                                     val matchingTask = tasks.firstOrNull { it.workoutId == workoutId && !it.done }
                                     if (matchingTask != null) repository.toggleTask(matchingTask.id)
+                                    navController.popBackStack()
+                                }
+                            }
+                        )
+                    }
+                }
+
+                composable(
+                    route = Routes.TIMER_VERIFY,
+                    arguments = listOf(navArgument("taskId") { type = NavType.StringType })
+                ) { backStackEntry ->
+                    val taskId = backStackEntry.arguments?.getString("taskId")
+                    val task = tasks.firstOrNull { it.id == taskId }
+                    if (task != null) {
+                        TimerVerificationScreen(
+                            taskTitle = task.title,
+                            durationMinutes = task.durationMinutes,
+                            onBack = { navController.popBackStack() },
+                            onVerified = {
+                                scope.launch {
+                                    repository.completeTaskWithTimer(task.id)
+                                    navController.popBackStack()
+                                }
+                            }
+                        )
+                    }
+                }
+
+                composable(
+                    route = Routes.PHOTO_VERIFY,
+                    arguments = listOf(navArgument("taskId") { type = NavType.StringType })
+                ) { backStackEntry ->
+                    val taskId = backStackEntry.arguments?.getString("taskId")
+                    val task = tasks.firstOrNull { it.id == taskId }
+                    if (task != null) {
+                        PhotoVerificationScreen(
+                            taskTitle = task.title,
+                            onBack = { navController.popBackStack() },
+                            onVerified = { photoPath ->
+                                scope.launch {
+                                    repository.completeTaskWithPhoto(task.id, photoPath)
                                     navController.popBackStack()
                                 }
                             }

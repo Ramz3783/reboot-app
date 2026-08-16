@@ -19,8 +19,13 @@ import kotlinx.coroutines.flow.map
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
+import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
+import java.time.temporal.TemporalAdjusters
+
+/** Streak lengths (in days) that trigger a celebration screen, Duolingo-style. */
+val STREAK_MILESTONES = listOf(3, 7, 14, 30, 60, 100, 180, 365)
 
 /**
  * Single source of truth for app state. Everything is persisted locally on-device via
@@ -33,6 +38,8 @@ class RebootRepository(context: Context) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     private fun today(): String = LocalDate.now().toString()
+    private fun mondayOfThisWeek(): String =
+        LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)).toString()
 
     // ---------------- USER PROFILE ----------------
 
@@ -52,18 +59,38 @@ class RebootRepository(context: Context) {
         saveUserProfile(transform(current))
     }
 
-    suspend fun addXp(amount: Int) {
+    /** Overall XP/level, PLUS the matching per-category "skill branch" XP. */
+    suspend fun addXp(amount: Int, category: String? = null) {
         updateProfile { p ->
             var xp = p.xp + amount
             var level = p.level
             var cap = p.xpToNextLevel
             var coins = p.coins + (amount / 5)
+            var leveledUp = false
             while (xp >= cap) {
                 xp -= cap
                 level += 1
                 cap = (cap * 1.15).toInt()
+                leveledUp = true
             }
-            p.copy(xp = xp, level = level, xpToNextLevel = cap, coins = coins)
+            val newCategoryXp = if (category != null) {
+                p.categoryXp.toMutableMap().apply { this[category] = (this[category] ?: 0) + amount }
+            } else p.categoryXp
+            p.copy(
+                xp = xp, level = level, xpToNextLevel = cap, coins = coins,
+                categoryXp = newCategoryXp,
+                pendingLevelUp = p.pendingLevelUp || leveledUp,
+            )
+        }
+    }
+
+    suspend fun clearPendingLevelUp() = updateProfile { it.copy(pendingLevelUp = false) }
+    suspend fun clearPendingMilestone() = updateProfile { it.copy(pendingMilestone = 0, lastCelebratedMilestone = maxOf(it.lastCelebratedMilestone, it.pendingMilestone)) }
+
+    suspend fun buyStreakFreeze(cost: Int = 100) {
+        val p = getUserProfileOnce()
+        if (p.coins >= cost) {
+            updateProfile { it.copy(coins = it.coins - cost, streakFreezes = it.streakFreezes + 1) }
         }
     }
 
@@ -72,13 +99,15 @@ class RebootRepository(context: Context) {
     }
 
     /**
-     * Runs once whenever the app comes to the foreground (called from Splash). Handles two
-     * things tied to real calendar dates, not app-session state:
-     *  1. "Ударный режим" (streak mode): if the person let a full day pass with the previous
-     *     day's tasks incomplete, the streak resets to 0. Completing all of today's tasks keeps
-     *     extending it — forever, as long as no day is skipped.
-     *  2. Daily task reset: yesterday's checked-off tasks un-check themselves for the new day,
-     *     so the task list is actually usable day after day instead of staying "done" forever.
+     * Runs once whenever the app comes to the foreground (called from Splash). Handles:
+     *  1. "Ударный режим" (streak mode): if a full day passed with yesterday's tasks
+     *     incomplete, the streak resets to 0 — UNLESS the person has a streak freeze banked,
+     *     which gets auto-consumed to protect it once (Duolingo-style).
+     *  2. Perfect-week tracking (all 7 days of the current week fully completed).
+     *  3. Milestone detection (3/7/14/30/... days) — sets pendingMilestone so the UI can
+     *     show a one-time celebration.
+     *  4. Daily task reset + light rotation so the list doesn't feel identical every day.
+     *  5. Makes sure there's always exactly one "daily challenge" bonus task available.
      */
     suspend fun runDailyMaintenance() {
         val profile = getUserProfileOnce()
@@ -90,20 +119,70 @@ class RebootRepository(context: Context) {
         } else {
             ChronoUnit.DAYS.between(LocalDate.parse(profile.lastStreakCreditDate), LocalDate.parse(todayStr))
         }
-        val brokeStreak = daysSinceCredit != null && daysSinceCredit >= 2
+        val aboutToBreak = daysSinceCredit != null && daysSinceCredit >= 2
+
+        val currentWeekAnchor = mondayOfThisWeek()
+        val isNewWeek = profile.weekAnchorDate != currentWeekAnchor
+
+        var newStreak = profile.streakDays
+        var newFreezes = profile.streakFreezes
+        if (aboutToBreak) {
+            if (newFreezes > 0) {
+                newFreezes -= 1 // freeze absorbs the miss, streak survives
+            } else {
+                newStreak = 0
+            }
+        }
+
+        val reachedMilestone = STREAK_MILESTONES.lastOrNull { it <= newStreak && it > profile.lastCelebratedMilestone } ?: 0
 
         updateProfile {
             it.copy(
                 lastTaskResetDate = todayStr,
-                streakDays = if (brokeStreak) 0 else it.streakDays,
+                streakDays = newStreak,
+                streakFreezes = newFreezes,
+                weekAnchorDate = currentWeekAnchor,
+                daysCompletedThisWeek = if (isNewWeek) 0 else it.daysCompletedThisWeek,
+                perfectWeekCount = if (isNewWeek && it.daysCompletedThisWeek >= 7) it.perfectWeekCount + 1 else it.perfectWeekCount,
+                pendingMilestone = if (reachedMilestone > 0) reachedMilestone else it.pendingMilestone,
             )
         }
 
-        // Fresh unchecked tasks for the new day.
-        val current = tasks.first()
-        if (current.isNotEmpty()) {
-            saveTasks(current.map { it.copy(done = false) })
+        rotateAndResetTasks(profile)
+    }
+
+    /** Fresh day: un-check everything, lightly rotate 1 task for variety, scale difficulty
+     * with level, and guarantee a daily challenge bonus task is present. */
+    private suspend fun rotateAndResetTasks(profile: UserProfile) {
+        var current = tasks.first().map { it.copy(done = false) }.filterNot { it.isDailyChallenge }
+
+        // Difficulty scaling: the higher the level, the more XP (and TIMER duration) tasks are worth.
+        val scale = 1f + (profile.level - 1) * 0.05f
+        current = current.map { t ->
+            if (t.verificationType == com.reboot.app.data.model.VerificationType.TIMER && profile.level > 5) {
+                t.copy(xpReward = (t.xpReward * scale).toInt())
+            } else t
         }
+
+        // Light rotation: every few days, swap one non-workout task for a fresh pool pick
+        // tied to the person's own problems, so it's not the exact same list forever.
+        if (profile.problems.isNotEmpty() && current.size > 1 && LocalDate.now().dayOfYear % 3 == 0) {
+            val swappable = current.filter { it.workoutId == null }
+            if (swappable.isNotEmpty()) {
+                val toReplace = swappable.random()
+                val pool = profile.problems.flatMap { OnboardingCatalog.taskPoolForProblem(it) }
+                    .filter { it.title != toReplace.title }
+                if (pool.isNotEmpty()) {
+                    val replacement = pool.random()
+                    current = current.map { if (it.id == toReplace.id) replacement.copy(id = "rot_${replacement.id}_${System.currentTimeMillis()}") else it }
+                }
+            }
+        }
+
+        // Always exactly one active daily challenge.
+        val challenge = OnboardingCatalog.randomDailyChallenge()
+        saveTasks(current + challenge)
+
         val currentHabits = habits.first()
         if (currentHabits.isNotEmpty()) {
             saveHabits(currentHabits.map { it.copy(completedToday = false) })
@@ -119,7 +198,7 @@ class RebootRepository(context: Context) {
         val problemTasks = problems.flatMap { OnboardingCatalog.tasksForProblem(it) }.distinctBy { it.id }
         val goalHabits = goals.mapNotNull { OnboardingCatalog.habitForGoal(it) }.distinctBy { it.id }
 
-        saveTasks(if (problemTasks.isNotEmpty()) problemTasks else defaultTasks())
+        saveTasks((if (problemTasks.isNotEmpty()) problemTasks else defaultTasks()) + OnboardingCatalog.randomDailyChallenge())
         saveHabits(if (goalHabits.isNotEmpty()) goalHabits else defaultHabits())
     }
 
@@ -134,6 +213,7 @@ class RebootRepository(context: Context) {
         store.putString(Keys.TASKS, json.encodeToString(items))
     }
 
+    /** Simple tap-to-complete path, used for NONE-verification tasks. */
     suspend fun toggleTask(id: String) {
         val current = tasks.first().toMutableList()
         val idx = current.indexOfFirst { it.id == id }
@@ -143,9 +223,37 @@ class RebootRepository(context: Context) {
             current[idx] = task.copy(done = nowDone)
             saveTasks(current)
             if (nowDone) {
-                addXp(task.xpReward)
-                creditStreakIfAllDone(current)
+                addXp(task.xpReward, task.category)
+                onTaskCompleted(current)
             }
+        }
+    }
+
+    /** Completion path for TIMER-verified tasks: only call this once the timer actually ran out. */
+    suspend fun completeTaskWithTimer(id: String) = toggleTaskDoneDirect(id)
+
+    /** Completion path for PHOTO-verified tasks: stores the local proof photo path. */
+    suspend fun completeTaskWithPhoto(id: String, photoPath: String) {
+        val current = tasks.first().toMutableList()
+        val idx = current.indexOfFirst { it.id == id }
+        if (idx >= 0 && !current[idx].done) {
+            val task = current[idx].copy(done = true, proofPhotoPath = photoPath)
+            current[idx] = task
+            saveTasks(current)
+            addXp(task.xpReward, task.category)
+            onTaskCompleted(current)
+        }
+    }
+
+    private suspend fun toggleTaskDoneDirect(id: String) {
+        val current = tasks.first().toMutableList()
+        val idx = current.indexOfFirst { it.id == id }
+        if (idx >= 0 && !current[idx].done) {
+            val task = current[idx].copy(done = true)
+            current[idx] = task
+            saveTasks(current)
+            addXp(task.xpReward, task.category)
+            onTaskCompleted(current)
         }
     }
 
@@ -165,19 +273,32 @@ class RebootRepository(context: Context) {
         saveTasks(current)
     }
 
-    private suspend fun creditStreakIfAllDone(current: List<TaskItem>) {
-        if (current.isEmpty() || !current.all { it.done }) return
+    /** Runs after ANY task is marked done: credits the streak/perfect-week counters once all
+     * of today's (non-bonus) tasks are complete. */
+    private suspend fun onTaskCompleted(current: List<TaskItem>) {
+        val required = current.filterNot { it.isDailyChallenge }
+        if (required.isEmpty() || !required.all { it.done }) return
         val profile = getUserProfileOnce()
         val todayStr = today()
         if (profile.lastStreakCreditDate == todayStr) return // already credited today, don't double count
-        updateProfile { it.copy(streakDays = it.streakDays + 1, lastStreakCreditDate = todayStr) }
+        val reachedMilestone = STREAK_MILESTONES.lastOrNull {
+            it <= profile.streakDays + 1 && it > profile.lastCelebratedMilestone
+        } ?: 0
+        updateProfile {
+            it.copy(
+                streakDays = it.streakDays + 1,
+                lastStreakCreditDate = todayStr,
+                daysCompletedThisWeek = it.daysCompletedThisWeek + 1,
+                pendingMilestone = if (reachedMilestone > 0) reachedMilestone else it.pendingMilestone,
+            )
+        }
     }
 
     private fun defaultTasks() = listOf(
         TaskItem("t1", "Тренировка", xpReward = 80, category = "Спорт", timeLabel = "07:30", workoutId = "beginner_full_body"),
-        TaskItem("t2", "Прочитать 20 страниц", xpReward = 40, category = "Развитие", timeLabel = "20:00"),
-        TaskItem("t3", "Медитация", xpReward = 30, category = "Психология", timeLabel = "21:00"),
-        TaskItem("t4", "Без телефона 1 час", xpReward = 50, category = "Дисциплина", timeLabel = "22:00"),
+        TaskItem("t2", "Прочитать 20 страниц", xpReward = 40, category = "Развитие", timeLabel = "20:00", verificationType = com.reboot.app.data.model.VerificationType.TIMER, durationMinutes = 20),
+        TaskItem("t3", "Медитация", xpReward = 30, category = "Психология", timeLabel = "21:00", verificationType = com.reboot.app.data.model.VerificationType.TIMER, durationMinutes = 10),
+        TaskItem("t4", "Без телефона 1 час", xpReward = 50, category = "Дисциплина", timeLabel = "22:00", verificationType = com.reboot.app.data.model.VerificationType.TIMER, durationMinutes = 60),
         TaskItem("t5", "Выпей 2 литра воды", xpReward = 25, category = "Здоровье", timeLabel = "весь день"),
         TaskItem("t6", "Составь план на завтра", xpReward = 30, category = "Планирование", timeLabel = "22:30"),
     )
@@ -261,10 +382,29 @@ class RebootRepository(context: Context) {
     )
 
     // ---------------- ACHIEVEMENTS ----------------
+    // Unlocked automatically based on real stats, not just static flags.
 
     val achievements: Flow<List<Achievement>> = store.stringFlow(Keys.ACHIEVEMENTS).map { raw ->
         if (raw.isBlank()) defaultAchievements() else runCatching { json.decodeFromString<List<Achievement>>(raw) }
             .getOrDefault(defaultAchievements())
+    }
+
+    /** Recomputes unlock state from the current profile/task stats. Call after XP/streak changes. */
+    suspend fun refreshAchievements() {
+        val profile = getUserProfileOnce()
+        val allTasks = tasks.first()
+        val completedWorkouts = allTasks.count { it.workoutId != null && it.done }
+        val current = achievements.first().map { a ->
+            val unlocked = when (a.id) {
+                "a1" -> profile.xp > 0 || profile.level > 1
+                "a2" -> profile.streakDays >= 7
+                "a3" -> profile.streakDays >= 30
+                "a7" -> completedWorkouts >= 10
+                else -> a.unlocked
+            }
+            a.copy(unlocked = unlocked)
+        }
+        store.putString(Keys.ACHIEVEMENTS, json.encodeToString(current))
     }
 
     private fun defaultAchievements() = listOf(
@@ -292,6 +432,25 @@ class RebootRepository(context: Context) {
         current.add(message)
         store.putString(key, json.encodeToString(current))
     }
+
+    /** True once per calendar day — used to trigger the AI's proactive morning briefing. */
+    suspend fun shouldShowMorningBriefing(): Boolean {
+        val p = getUserProfileOnce()
+        return p.lastMorningBriefingDate != today()
+    }
+
+    suspend fun markMorningBriefingShown() = updateProfile { it.copy(lastMorningBriefingDate = today()) }
+
+    /** True after ~17:00 local time, once per day, if there are still incomplete tasks —
+     * used to trigger the AI's proactive evening recap / nudge. */
+    suspend fun shouldShowEveningRecap(): Boolean {
+        val p = getUserProfileOnce()
+        if (p.lastEveningRecapDate == today()) return false
+        val hour = LocalDate.now().let { java.time.LocalTime.now().hour }
+        return hour >= 17
+    }
+
+    suspend fun markEveningRecapShown() = updateProfile { it.copy(lastEveningRecapDate = today()) }
 
     // ---------------- SETTINGS ----------------
     // Note: the Groq API key itself is baked in at build time (BuildConfig, see GroqApi.kt) —

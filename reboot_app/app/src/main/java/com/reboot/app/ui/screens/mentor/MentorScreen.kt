@@ -31,6 +31,7 @@ fun MentorScreen(
     onOpenVoice: () -> Unit,
     getHistory: (MentorMode) -> kotlinx.coroutines.flow.Flow<List<ChatMessage>>,
     onSendMessage: suspend (MentorMode, ChatMessage) -> Unit,
+    onEnterChat: suspend (MentorMode) -> Unit,
 ) {
     var selectedMode by remember { mutableStateOf<MentorMode?>(null) }
 
@@ -44,7 +45,8 @@ fun MentorScreen(
             history = getHistory(mode),
             onBack = { selectedMode = null },
             onOpenVoice = onOpenVoice,
-            onSendMessage = { msg -> onSendMessage(mode, msg) }
+            onSendMessage = { msg -> onSendMessage(mode, msg) },
+            onEnterChat = { onEnterChat(mode) },
         )
     }
 }
@@ -89,6 +91,7 @@ private fun ChatScreen(
     onBack: () -> Unit,
     onOpenVoice: () -> Unit,
     onSendMessage: suspend (ChatMessage) -> Unit,
+    onEnterChat: suspend () -> Unit,
 ) {
     val messages by history.collectAsState(initial = emptyList())
     var input by remember { mutableStateOf("") }
@@ -96,6 +99,8 @@ private fun ChatScreen(
     var errorText by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+
+    LaunchedEffect(mode) { onEnterChat() }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)

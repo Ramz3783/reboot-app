@@ -24,4 +24,10 @@ object Routes {
     const val PRO = "pro"
     const val WORKOUT = "workout/{workoutId}"
     fun workoutRoute(workoutId: String) = "workout/$workoutId"
+
+    const val TIMER_VERIFY = "timer_verify/{taskId}"
+    fun timerVerifyRoute(taskId: String) = "timer_verify/$taskId"
+
+    const val PHOTO_VERIFY = "photo_verify/{taskId}"
+    fun photoVerifyRoute(taskId: String) = "photo_verify/$taskId"
 }
