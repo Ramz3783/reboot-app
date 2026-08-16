@@ -44,9 +44,15 @@ fun PlansScreen(
             }
             Spacer(Modifier.height(16.dp))
 
-            when (tab) {
-                PlansTab.MINE -> MyPlansList(plans, onCreatePlan)
-                PlansTab.TEMPLATES -> TemplatesList(onApplyTemplate)
+            // Single scrolling, weighted container — weight() must be called directly inside
+            // this Column's own scope, so both tabs share this one wrapper instead of each
+            // creating their own (that was the earlier compile error: ColumnScope.weight()
+            // isn't visible from inside a separate, non-nested @Composable function).
+            Column(Modifier.weight(1f).verticalScrollCompat()) {
+                when (tab) {
+                    PlansTab.MINE -> MyPlansContent(plans, onCreatePlan)
+                    PlansTab.TEMPLATES -> TemplatesContent(onApplyTemplate)
+                }
             }
         }
     }
@@ -66,63 +72,59 @@ private fun PlanTabChip(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun MyPlansList(plans: List<PlanItem>, onCreatePlan: () -> Unit) {
-    Column(Modifier.weight(1f).verticalScrollCompat()) {
-        if (plans.isEmpty()) {
-            Text("У тебя пока нет планов — возьми готовый шаблон или создай свой.", color = TextTertiary, fontSize = 13.sp)
-            Spacer(Modifier.height(16.dp))
-        }
-        plans.forEach { plan ->
-            NeonCard(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-                Column(Modifier.fillMaxWidth()) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text(plan.title, color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                        Text("${plan.progressPercent}%", color = AccentGreen, fontWeight = FontWeight.Bold)
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Text(plan.category, color = TextTertiary, fontSize = 12.sp)
-                    Spacer(Modifier.height(10.dp))
-                    val fraction = plan.progressPercent / 100f
-                    Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(CardLight)) {
-                        Box(
-                            Modifier.fillMaxWidth(fraction).height(6.dp).clip(RoundedCornerShape(3.dp))
-                                .background(Brush.horizontalGradient(listOf(AccentPurple, AccentCyan)))
-                        )
-                    }
+private fun MyPlansContent(plans: List<PlanItem>, onCreatePlan: () -> Unit) {
+    if (plans.isEmpty()) {
+        Text("У тебя пока нет планов — возьми готовый шаблон или создай свой.", color = TextTertiary, fontSize = 13.sp)
+        Spacer(Modifier.height(16.dp))
+    }
+    plans.forEach { plan ->
+        NeonCard(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+            Column(Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(plan.title, color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text("${plan.progressPercent}%", color = AccentGreen, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(plan.category, color = TextTertiary, fontSize = 12.sp)
+                Spacer(Modifier.height(10.dp))
+                val fraction = plan.progressPercent / 100f
+                Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(CardLight)) {
+                    Box(
+                        Modifier.fillMaxWidth(fraction).height(6.dp).clip(RoundedCornerShape(3.dp))
+                            .background(Brush.horizontalGradient(listOf(AccentPurple, AccentCyan)))
+                    )
                 }
             }
         }
-        Spacer(Modifier.height(6.dp))
-        OutlineButton(text = "+ Создать свой план", onClick = onCreatePlan)
-        Spacer(Modifier.height(90.dp))
     }
+    Spacer(Modifier.height(6.dp))
+    OutlineButton(text = "+ Создать свой план", onClick = onCreatePlan)
+    Spacer(Modifier.height(90.dp))
 }
 
 @Composable
-private fun TemplatesList(onApplyTemplate: (PlanTemplate) -> Unit) {
+private fun TemplatesContent(onApplyTemplate: (PlanTemplate) -> Unit) {
     var addedIds by remember { mutableStateOf(setOf<String>()) }
-    Column(Modifier.weight(1f).verticalScrollCompat()) {
-        TemplateCatalog.TEMPLATES.forEach { template ->
-            val added = template.id in addedIds
-            NeonCard(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-                Column(Modifier.fillMaxWidth()) {
-                    Text(template.title, color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(4.dp))
-                    Text(template.category, color = TextTertiary, fontSize = 12.sp)
-                    Spacer(Modifier.height(4.dp))
-                    Text(template.taskTitles.joinToString(" · "), color = TextSecondary, fontSize = 12.sp)
-                    Spacer(Modifier.height(12.dp))
-                    if (added) {
-                        OutlineButton(text = "Добавлено ✓") { }
-                    } else {
-                        GradientButton(text = "Добавить в мои планы") {
-                            onApplyTemplate(template)
-                            addedIds = addedIds + template.id
-                        }
+    TemplateCatalog.TEMPLATES.forEach { template ->
+        val added = template.id in addedIds
+        NeonCard(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+            Column(Modifier.fillMaxWidth()) {
+                Text(template.title, color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Text(template.category, color = TextTertiary, fontSize = 12.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(template.taskTitles.joinToString(" · "), color = TextSecondary, fontSize = 12.sp)
+                Spacer(Modifier.height(12.dp))
+                if (added) {
+                    OutlineButton(text = "Добавлено ✓") { }
+                } else {
+                    GradientButton(text = "Добавить в мои планы") {
+                        onApplyTemplate(template)
+                        addedIds = addedIds + template.id
                     }
                 }
             }
         }
-        Spacer(Modifier.height(90.dp))
     }
+    Spacer(Modifier.height(90.dp))
 }
