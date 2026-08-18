@@ -30,4 +30,6 @@ object Routes {
 
     const val PHOTO_VERIFY = "photo_verify/{taskId}"
     fun photoVerifyRoute(taskId: String) = "photo_verify/$taskId"
+
+    const val SKINS = "skins"
 }

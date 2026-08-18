@@ -28,6 +28,13 @@ data class UserProfile(
     val daysCompletedThisWeek: Int = 0,
     val weekAnchorDate: String = "", // Monday of the week we're currently counting
     val lastCelebratedMilestone: Int = 0,
+    // "Восстановление серии": if a day was fully missed and no freeze was available, instead
+    // of hard-resetting immediately, the person gets ONE day to clear double the normal task
+    // count to restore the streak instead of losing it.
+    val pendingStreakRepair: Boolean = false,
+    val streakRepairTarget: Int = 0,
+    val streakRepairProgress: Int = 0,
+    val streakBeforeBreak: Int = 0,
     // Per-category "skill branch" XP/levels, e.g. {"Спорт": 340, "Дисциплина": 120}.
     val categoryXp: Map<String, Int> = emptyMap(),
     // Pending one-shot UI events the app should show once, then clear.
@@ -35,7 +42,16 @@ data class UserProfile(
     val pendingLevelUp: Boolean = false,
     val lastMorningBriefingDate: String = "",
     val lastEveningRecapDate: String = "",
+    // Profile accent colors, unlockable with coins ("скины").
+    val unlockedSkins: List<String> = listOf("violet"),
+    val activeSkin: String = "violet",
+    // Rolling log of recently completed task titles per day, used so the AI coach can spot
+    // real patterns ("3 дня подряд пропускаешь тренировку") instead of guessing.
+    val recentDayLogs: List<DayLog> = emptyList(),
 )
+
+@Serializable
+data class DayLog(val date: String, val completedTitles: List<String>, val missedTitles: List<String>)
 
 enum class VerificationType { NONE, TIMER, PHOTO, STEPS }
 
@@ -335,6 +351,21 @@ object TemplateCatalog {
             listOf("Лимит соцсетей 30 минут", "Убери приложения с главного экрана", "Час без телефона")
         ),
     )
+}
+
+object SkinCatalog {
+    data class Skin(val id: String, val label: String, val color: Long, val cost: Int)
+
+    val SKINS = listOf(
+        Skin("violet", "Фиолетовый", 0xFF8B5CF6, 0),
+        Skin("cyan", "Бирюзовый", 0xFF00D2D3, 150),
+        Skin("gold", "Золотой", 0xFFFFC857, 250),
+        Skin("pink", "Розовый", 0xFFFF6B9D, 250),
+        Skin("green", "Изумрудный", 0xFF35E58A, 350),
+        Skin("red", "Огненный", 0xFFFF4D67, 450),
+    )
+
+    fun byId(id: String): Skin = SKINS.firstOrNull { it.id == id } ?: SKINS.first()
 }
 
 object WorkoutCatalog {

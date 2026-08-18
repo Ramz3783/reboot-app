@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.reboot.app.data.model.SkinCatalog
 import com.reboot.app.data.model.UserProfile
 import com.reboot.app.ui.theme.*
 
@@ -28,6 +29,7 @@ private val menuItems = listOf(
     MenuRow("Привычки", Icons.Filled.Repeat, "habits"),
     MenuRow("Цели", Icons.Filled.Flag, "plans"),
     MenuRow("Статистика", Icons.Filled.BarChart, "progress"),
+    MenuRow("Скины", Icons.Filled.Palette, "skins"),
     MenuRow("Настройки", Icons.Filled.Settings, "settings"),
     MenuRow("PRO подписка", Icons.Filled.WorkspacePremium, "pro"),
 )
@@ -38,13 +40,14 @@ fun ProfileScreen(
     onNavigate: (String) -> Unit,
     onLogout: () -> Unit,
 ) {
+    val skinColor = Color(SkinCatalog.byId(profile.activeSkin).color)
     Box(Modifier.fillMaxSize().background(BgDeep)) {
         Column(Modifier.fillMaxSize().verticalScrollCompat().padding(20.dp)) {
             Spacer(Modifier.height(16.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier.size(64.dp).clip(CircleShape)
-                        .background(Brush.linearGradient(listOf(AccentPurple, AccentCyan))),
+                        .background(Brush.linearGradient(listOf(skinColor, AccentCyan))),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(

@@ -23,6 +23,7 @@ object Keys {
     val SILENT_MODE = booleanPreferencesKey("silent_mode")
     val NOTIFICATIONS = booleanPreferencesKey("notifications_enabled")
     val LANGUAGE = stringPreferencesKey("language")
+    val COACH_NOTE = stringPreferencesKey("coach_note")
 }
 
 class PrefsStore(private val context: Context) {

@@ -6,13 +6,16 @@ import com.reboot.app.data.local.Keys
 import com.reboot.app.data.local.PrefsStore
 import com.reboot.app.data.model.Achievement
 import com.reboot.app.data.model.ChatMessage
+import com.reboot.app.data.model.DayLog
 import com.reboot.app.data.model.HabitItem
 import com.reboot.app.data.model.MentorMode
 import com.reboot.app.data.model.OnboardingCatalog
 import com.reboot.app.data.model.PlanItem
 import com.reboot.app.data.model.PlanTemplate
+import com.reboot.app.data.model.SkinCatalog
 import com.reboot.app.data.model.TaskItem
 import com.reboot.app.data.model.UserProfile
+import com.reboot.app.data.model.VerificationType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -21,11 +24,13 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import java.time.DayOfWeek
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.temporal.ChronoUnit
 import java.time.temporal.TemporalAdjusters
 
 /** Streak lengths (in days) that trigger a celebration screen, Duolingo-style. */
 val STREAK_MILESTONES = listOf(3, 7, 14, 30, 60, 100, 180, 365)
+private const val PERFECT_WEEK_BONUS_XP = 200
 
 /**
  * Single source of truth for app state. Everything is persisted locally on-device via
@@ -89,30 +94,48 @@ class RebootRepository(context: Context) {
 
     suspend fun buyStreakFreeze(cost: Int = 100) {
         val p = getUserProfileOnce()
-        if (p.coins >= cost) {
-            updateProfile { it.copy(coins = it.coins - cost, streakFreezes = it.streakFreezes + 1) }
+        if (p.coins >= cost) updateProfile { it.copy(coins = it.coins - cost, streakFreezes = it.streakFreezes + 1) }
+    }
+
+    suspend fun buySkin(skinId: String) {
+        val p = getUserProfileOnce()
+        val skin = SkinCatalog.byId(skinId)
+        if (skinId in p.unlockedSkins) return
+        if (p.coins >= skin.cost) {
+            updateProfile { it.copy(coins = it.coins - skin.cost, unlockedSkins = it.unlockedSkins + skinId) }
         }
+    }
+
+    suspend fun setActiveSkin(skinId: String) {
+        val p = getUserProfileOnce()
+        if (skinId in p.unlockedSkins) updateProfile { it.copy(activeSkin = skinId) }
     }
 
     suspend fun logout() {
         updateProfile { it.copy(isLoggedIn = false) }
     }
 
+    // ---------------- DAILY MAINTENANCE ("ударный режим" / streak mode) ----------------
+
     /**
      * Runs once whenever the app comes to the foreground (called from Splash). Handles:
-     *  1. "Ударный режим" (streak mode): if a full day passed with yesterday's tasks
-     *     incomplete, the streak resets to 0 — UNLESS the person has a streak freeze banked,
-     *     which gets auto-consumed to protect it once (Duolingo-style).
-     *  2. Perfect-week tracking (all 7 days of the current week fully completed).
-     *  3. Milestone detection (3/7/14/30/... days) — sets pendingMilestone so the UI can
-     *     show a one-time celebration.
-     *  4. Daily task reset + light rotation so the list doesn't feel identical every day.
-     *  5. Makes sure there's always exactly one "daily challenge" bonus task available.
+     *  1. Streak freeze: if a full day passed with yesterday's tasks incomplete, a banked
+     *     freeze auto-absorbs the miss.
+     *  2. Streak repair: if no freeze is available, the streak isn't reset immediately —
+     *     the person gets today to clear DOUBLE the normal task count to restore it.
+     *     If yesterday's repair window was not fulfilled, THAT'S when it actually resets.
+     *  3. Perfect-week bonus: full 7/7 days completed in the week that just ended awards bonus XP.
+     *  4. Milestone detection (3/7/14/30/...) -> one-shot celebration flag.
+     *  5. Daily task reset + light rotation + level-scaled difficulty + a fresh daily challenge.
+     *  6. Logs yesterday's completed/missed task titles so the AI coach can spot real patterns.
      */
     suspend fun runDailyMaintenance() {
         val profile = getUserProfileOnce()
         val todayStr = today()
         if (profile.lastTaskResetDate == todayStr) return // already handled today
+
+        val yesterdayTasks = tasks.first()
+        logYesterday(profile, yesterdayTasks, todayStr)
 
         val daysSinceCredit = if (profile.lastStreakCreditDate.isBlank()) {
             null
@@ -121,18 +144,35 @@ class RebootRepository(context: Context) {
         }
         val aboutToBreak = daysSinceCredit != null && daysSinceCredit >= 2
 
-        val currentWeekAnchor = mondayOfThisWeek()
-        val isNewWeek = profile.weekAnchorDate != currentWeekAnchor
-
         var newStreak = profile.streakDays
         var newFreezes = profile.streakFreezes
-        if (aboutToBreak) {
+        var repairPending = profile.pendingStreakRepair
+        var repairTarget = profile.streakRepairTarget
+        var repairProgress = 0
+        var streakBeforeBreak = profile.streakBeforeBreak
+
+        if (profile.pendingStreakRepair) {
+            // Yesterday's repair window already expired without being fulfilled -> real reset now.
+            newStreak = 0
+            repairPending = false
+            repairTarget = 0
+            streakBeforeBreak = 0
+        } else if (aboutToBreak) {
             if (newFreezes > 0) {
-                newFreezes -= 1 // freeze absorbs the miss, streak survives
+                newFreezes -= 1 // freeze absorbs the miss silently, streak survives untouched
             } else {
-                newStreak = 0
+                // Don't hard-reset yet — offer one make-up day at double the normal task count.
+                val normalCount = yesterdayTasks.count { !it.isDailyChallenge }.coerceAtLeast(2)
+                repairPending = true
+                repairTarget = normalCount * 2
+                streakBeforeBreak = profile.streakDays
+                // newStreak intentionally left as-is (still shown) until repair window resolves
             }
         }
+
+        val currentWeekAnchor = mondayOfThisWeek()
+        val isNewWeek = profile.weekAnchorDate != currentWeekAnchor
+        val perfectWeekJustCompleted = isNewWeek && profile.daysCompletedThisWeek >= 7
 
         val reachedMilestone = STREAK_MILESTONES.lastOrNull { it <= newStreak && it > profile.lastCelebratedMilestone } ?: 0
 
@@ -141,27 +181,53 @@ class RebootRepository(context: Context) {
                 lastTaskResetDate = todayStr,
                 streakDays = newStreak,
                 streakFreezes = newFreezes,
+                pendingStreakRepair = repairPending,
+                streakRepairTarget = repairTarget,
+                streakRepairProgress = repairProgress,
+                streakBeforeBreak = streakBeforeBreak,
                 weekAnchorDate = currentWeekAnchor,
                 daysCompletedThisWeek = if (isNewWeek) 0 else it.daysCompletedThisWeek,
-                perfectWeekCount = if (isNewWeek && it.daysCompletedThisWeek >= 7) it.perfectWeekCount + 1 else it.perfectWeekCount,
+                perfectWeekCount = if (perfectWeekJustCompleted) it.perfectWeekCount + 1 else it.perfectWeekCount,
                 pendingMilestone = if (reachedMilestone > 0) reachedMilestone else it.pendingMilestone,
             )
+        }
+
+        if (perfectWeekJustCompleted) {
+            addXp(PERFECT_WEEK_BONUS_XP) // real bonus, not just a counter
         }
 
         rotateAndResetTasks(profile)
     }
 
-    /** Fresh day: un-check everything, lightly rotate 1 task for variety, scale difficulty
-     * with level, and guarantee a daily challenge bonus task is present. */
+    private suspend fun logYesterday(profile: UserProfile, yesterdayTasks: List<TaskItem>, todayStr: String) {
+        if (profile.lastTaskResetDate.isBlank() || yesterdayTasks.isEmpty()) return
+        val real = yesterdayTasks.filterNot { it.isDailyChallenge }
+        val entry = DayLog(
+            date = profile.lastTaskResetDate,
+            completedTitles = real.filter { it.done }.map { it.title },
+            missedTitles = real.filterNot { it.done }.map { it.title },
+        )
+        updateProfile { it.copy(recentDayLogs = (it.recentDayLogs + entry).takeLast(14)) }
+    }
+
+    /** Fresh day: un-check everything, lightly rotate for variety, scale difficulty with
+     * level (both XP AND timer duration), and guarantee a daily challenge shows up every
+     * few days (not literally every single day, so it stays a "surprise"). */
     private suspend fun rotateAndResetTasks(profile: UserProfile) {
         var current = tasks.first().map { it.copy(done = false) }.filterNot { it.isDailyChallenge }
 
-        // Difficulty scaling: the higher the level, the more XP (and TIMER duration) tasks are worth.
-        val scale = 1f + (profile.level - 1) * 0.05f
+        // Difficulty scaling with level: both reward AND timer duration grow, so e.g.
+        // "no phone" starts at 30 min and stretches toward 2 hours as the person levels up.
+        val xpScale = 1f + (profile.level - 1) * 0.06f
+        val durationScale = 1f + (profile.level - 1) * 0.12f
         current = current.map { t ->
-            if (t.verificationType == com.reboot.app.data.model.VerificationType.TIMER && profile.level > 5) {
-                t.copy(xpReward = (t.xpReward * scale).toInt())
-            } else t
+            val scaledXp = (t.xpReward * xpScale).toInt()
+            if (t.verificationType == VerificationType.TIMER) {
+                val scaledMinutes = (t.durationMinutes * durationScale).toInt().coerceAtMost(120)
+                t.copy(xpReward = scaledXp, durationMinutes = scaledMinutes)
+            } else {
+                t.copy(xpReward = scaledXp)
+            }
         }
 
         // Light rotation: every few days, swap one non-workout task for a fresh pool pick
@@ -179,8 +245,8 @@ class RebootRepository(context: Context) {
             }
         }
 
-        // Always exactly one active daily challenge.
-        val challenge = OnboardingCatalog.randomDailyChallenge()
+        // "Случайный вызов дня": a bonus x2-XP task every ~3 days, not literally daily.
+        val challenge = if (LocalDate.now().dayOfYear % 3 == 0) listOf(OnboardingCatalog.randomDailyChallenge()) else emptyList()
         saveTasks(current + challenge)
 
         val currentHabits = habits.first()
@@ -273,13 +339,35 @@ class RebootRepository(context: Context) {
         saveTasks(current)
     }
 
-    /** Runs after ANY task is marked done: credits the streak/perfect-week counters once all
-     * of today's (non-bonus) tasks are complete. */
+    /** Runs after ANY task is marked done. Handles two separate things:
+     *  1. Streak-repair progress: if a repair is pending, count this toward the double target;
+     *     once reached, the streak is restored (+1) and the repair clears.
+     *  2. Normal streak credit once all of today's (non-bonus) tasks are complete. */
     private suspend fun onTaskCompleted(current: List<TaskItem>) {
-        val required = current.filterNot { it.isDailyChallenge }
-        if (required.isEmpty() || !required.all { it.done }) return
         val profile = getUserProfileOnce()
         val todayStr = today()
+
+        if (profile.pendingStreakRepair) {
+            val doneToday = current.count { it.done && !it.isDailyChallenge }
+            if (doneToday >= profile.streakRepairTarget) {
+                updateProfile {
+                    it.copy(
+                        streakDays = it.streakBeforeBreak + 1,
+                        lastStreakCreditDate = todayStr,
+                        pendingStreakRepair = false,
+                        streakRepairTarget = 0,
+                        streakRepairProgress = 0,
+                        streakBeforeBreak = 0,
+                    )
+                }
+            } else {
+                updateProfile { it.copy(streakRepairProgress = doneToday) }
+            }
+            return
+        }
+
+        val required = current.filterNot { it.isDailyChallenge }
+        if (required.isEmpty() || !required.all { it.done }) return
         if (profile.lastStreakCreditDate == todayStr) return // already credited today, don't double count
         val reachedMilestone = STREAK_MILESTONES.lastOrNull {
             it <= profile.streakDays + 1 && it > profile.lastCelebratedMilestone
@@ -296,9 +384,9 @@ class RebootRepository(context: Context) {
 
     private fun defaultTasks() = listOf(
         TaskItem("t1", "Тренировка", xpReward = 80, category = "Спорт", timeLabel = "07:30", workoutId = "beginner_full_body"),
-        TaskItem("t2", "Прочитать 20 страниц", xpReward = 40, category = "Развитие", timeLabel = "20:00", verificationType = com.reboot.app.data.model.VerificationType.TIMER, durationMinutes = 20),
-        TaskItem("t3", "Медитация", xpReward = 30, category = "Психология", timeLabel = "21:00", verificationType = com.reboot.app.data.model.VerificationType.TIMER, durationMinutes = 10),
-        TaskItem("t4", "Без телефона 1 час", xpReward = 50, category = "Дисциплина", timeLabel = "22:00", verificationType = com.reboot.app.data.model.VerificationType.TIMER, durationMinutes = 60),
+        TaskItem("t2", "Прочитать 20 страниц", xpReward = 40, category = "Развитие", timeLabel = "20:00", verificationType = VerificationType.TIMER, durationMinutes = 20),
+        TaskItem("t3", "Медитация", xpReward = 30, category = "Психология", timeLabel = "21:00", verificationType = VerificationType.TIMER, durationMinutes = 10),
+        TaskItem("t4", "Без телефона 1 час", xpReward = 50, category = "Дисциплина", timeLabel = "22:00", verificationType = VerificationType.TIMER, durationMinutes = 30),
         TaskItem("t5", "Выпей 2 литра воды", xpReward = 25, category = "Здоровье", timeLabel = "весь день"),
         TaskItem("t6", "Составь план на завтра", xpReward = 30, category = "Планирование", timeLabel = "22:30"),
     )
@@ -433,24 +521,38 @@ class RebootRepository(context: Context) {
         store.putString(key, json.encodeToString(current))
     }
 
-    /** True once per calendar day — used to trigger the AI's proactive morning briefing. */
-    suspend fun shouldShowMorningBriefing(): Boolean {
-        val p = getUserProfileOnce()
-        return p.lastMorningBriefingDate != today()
-    }
+    // ---------------- PROACTIVE AI (shown right on the Home screen, not buried in chat) ----------------
 
+    /** A short note the coach wants to show on the Home screen right now, or null if nothing
+     * is due. Persisted so it survives navigation/recomposition until dismissed. */
+    val coachNote: Flow<String?> = store.stringFlow(Keys.COACH_NOTE).map { it.ifBlank { null } }
+
+    suspend fun setCoachNote(text: String) = store.putString(Keys.COACH_NOTE, text)
+    suspend fun clearCoachNote() = store.putString(Keys.COACH_NOTE, "")
+
+    suspend fun shouldShowMorningBriefing(): Boolean = getUserProfileOnce().lastMorningBriefingDate != today()
     suspend fun markMorningBriefingShown() = updateProfile { it.copy(lastMorningBriefingDate = today()) }
 
-    /** True after ~17:00 local time, once per day, if there are still incomplete tasks —
-     * used to trigger the AI's proactive evening recap / nudge. */
     suspend fun shouldShowEveningRecap(): Boolean {
         val p = getUserProfileOnce()
         if (p.lastEveningRecapDate == today()) return false
-        val hour = LocalDate.now().let { java.time.LocalTime.now().hour }
-        return hour >= 17
+        return LocalTime.now().hour >= 17
     }
 
     suspend fun markEveningRecapShown() = updateProfile { it.copy(lastEveningRecapDate = today()) }
+
+    /** Simple, honest pattern detection over the last two weeks' logs: a task title that was
+     * missed 3+ days running. Used to give the AI real signal instead of guessing. */
+    suspend fun detectSkipPattern(): String? {
+        val logs = getUserProfileOnce().recentDayLogs
+        if (logs.size < 3) return null
+        val lastThree = logs.takeLast(3)
+        val allTitles = lastThree.flatMap { it.missedTitles + it.completedTitles }.distinct()
+        for (title in allTitles) {
+            if (lastThree.all { title in it.missedTitles }) return title
+        }
+        return null
+    }
 
     // ---------------- SETTINGS ----------------
     // Note: the Groq API key itself is baked in at build time (BuildConfig, see GroqApi.kt) —

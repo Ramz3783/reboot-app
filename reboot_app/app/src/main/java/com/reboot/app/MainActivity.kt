@@ -25,7 +25,6 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import com.reboot.app.data.model.ChatMessage
 import com.reboot.app.data.model.MentorMode
 import com.reboot.app.data.model.UserProfile
 import com.reboot.app.data.model.WorkoutCatalog
@@ -51,6 +50,7 @@ import com.reboot.app.ui.screens.profile.ProfileScreen
 import com.reboot.app.ui.screens.progress.ProgressScreen
 import com.reboot.app.ui.screens.pro.ProScreen
 import com.reboot.app.ui.screens.settings.SettingsScreen
+import com.reboot.app.ui.screens.skins.SkinsScreen
 import com.reboot.app.ui.screens.splash.SplashScreen
 import com.reboot.app.ui.screens.verification.PhotoVerificationScreen
 import com.reboot.app.ui.screens.verification.TimerVerificationScreen
@@ -75,32 +75,40 @@ class MainActivity : ComponentActivity() {
 
 private val mainTabRoutes = setOf(Routes.HOME, Routes.PLANS, Routes.MENTOR, Routes.PROFILE)
 
-/** Builds a one-off proactive AI message (morning briefing or evening recap) and appends it
- * to that mode's chat as if the coach started the conversation. Never persists the synthetic
- * instruction itself — only the assistant's reply. */
-private suspend fun maybeSendProactiveMessage(repository: RebootRepository, model: String, mode: MentorMode) {
+/**
+ * Fetches a short proactive note from the AI coach and stores it so the Home screen can show
+ * it directly as a banner — this is what makes the coach feel proactive ("сам пишет"),
+ * instead of requiring the person to dig into the Mentor tab and pick a mode first.
+ * Also feeds in real skip-pattern detection from the last few days' logs, so the coach can
+ * comment on actual behavior ("3 дня подряд пропускаешь тренировку") instead of guessing.
+ */
+private suspend fun maybeFetchHomeCoachNote(repository: RebootRepository, model: String) {
+    if (repository.coachNote.first() != null) return // one still showing, don't overwrite it
+
     val profile = repository.getUserProfileOnce()
     val allTasks = repository.tasks.first()
     val done = allTasks.count { it.done }
     val total = allTasks.size
+    val skipPattern = repository.detectSkipPattern()
+    val patternLine = if (skipPattern != null) {
+        " Замечено: пользователь пропускает \"$skipPattern\" уже несколько дней подряд — можешь мягко спросить, в чём дело."
+    } else ""
 
-    if (repository.shouldShowMorningBriefing()) {
-        repository.markMorningBriefingShown()
-        val prompt = "Ты сам начинаешь разговор, как только пользователь открыл приложение утром. " +
-            "Его серия: ${profile.streakDays} дней, уровень ${profile.level}, задач на сегодня: $total. " +
-            "Поприветствуй его коротко (2-3 предложения) и замотивируй начать день, в своём стиле."
-        val result = GroqApi.chatCompletion(model, mode.systemPrompt, listOf("user" to prompt))
-        if (result is GroqApi.Result.Success) {
-            repository.appendChatMessage(mode, ChatMessage("assistant", result.text))
+    when {
+        repository.shouldShowMorningBriefing() -> {
+            repository.markMorningBriefingShown()
+            val prompt = "Пользователь только что открыл приложение утром. Серия: ${profile.streakDays} дней, " +
+                "уровень ${profile.level}, задач на сегодня: $total.$patternLine Напиши короткое (1-2 предложения) " +
+                "утреннее сообщение с фокусом дня, сразу по делу, без вступлений вроде 'Привет!'."
+            val result = GroqApi.chatCompletion(model, MentorMode.MOTIVATOR.systemPrompt, listOf("user" to prompt))
+            if (result is GroqApi.Result.Success) repository.setCoachNote(result.text)
         }
-    } else if (repository.shouldShowEveningRecap() && total > 0 && done < total) {
-        repository.markEveningRecapShown()
-        val prompt = "Сейчас вечер. Из $total задач на сегодня выполнено только $done. " +
-            "Серия: ${profile.streakDays} дней. Коротко (2-3 предложения) мягко подтолкни закрыть " +
-            "оставшиеся задачи, в своём стиле."
-        val result = GroqApi.chatCompletion(model, mode.systemPrompt, listOf("user" to prompt))
-        if (result is GroqApi.Result.Success) {
-            repository.appendChatMessage(mode, ChatMessage("assistant", result.text))
+        repository.shouldShowEveningRecap() && total > 0 && done < total -> {
+            repository.markEveningRecapShown()
+            val prompt = "Сейчас вечер. Из $total задач выполнено только $done. Серия: ${profile.streakDays} дней." +
+                "$patternLine Коротко (1-2 предложения) спроси, что помешало закрыть остальные, по-дружески."
+            val result = GroqApi.chatCompletion(model, MentorMode.MOTIVATOR.systemPrompt, listOf("user" to prompt))
+            if (result is GroqApi.Result.Success) repository.setCoachNote(result.text)
         }
     }
 }
@@ -119,6 +127,7 @@ fun RebootNavGraph(repository: RebootRepository) {
     val model by repository.groqModel.collectAsState(initial = "llama-3.3-70b-versatile")
     val notifications by repository.notificationsEnabled.collectAsState(initial = true)
     val silentMode by repository.silentMode.collectAsState(initial = false)
+    val coachNote by repository.coachNote.collectAsState(initial = null)
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -248,9 +257,12 @@ fun RebootNavGraph(repository: RebootRepository) {
                 }
 
                 composable(Routes.HOME) {
+                    LaunchedEffect(Unit) { maybeFetchHomeCoachNote(repository, model) }
                     HomeScreen(
                         profile = profile,
                         tasks = tasks,
+                        coachNote = coachNote,
+                        onDismissCoachNote = { scope.launch { repository.clearCoachNote() } },
                         onToggleTask = { id -> scope.launch { repository.toggleTask(id) } },
                         onOpenWorkout = { workoutId -> navController.navigate(Routes.workoutRoute(workoutId)) },
                         onOpenTimerVerification = { taskId -> navController.navigate(Routes.timerVerifyRoute(taskId)) },
@@ -282,7 +294,7 @@ fun RebootNavGraph(repository: RebootRepository) {
                         onOpenVoice = { navController.navigate(Routes.VOICE) },
                         getHistory = { mode -> repository.chatHistory(mode) },
                         onSendMessage = { mode, msg -> repository.appendChatMessage(mode, msg) },
-                        onEnterChat = { mode -> maybeSendProactiveMessage(repository, model, mode) },
+                        onEnterChat = { },
                     )
                 }
 
@@ -304,6 +316,15 @@ fun RebootNavGraph(repository: RebootRepository) {
                                 navController.navigate(Routes.LOGIN) { popUpTo(0) { inclusive = true } }
                             }
                         }
+                    )
+                }
+
+                composable(Routes.SKINS) {
+                    SkinsScreen(
+                        profile = profile,
+                        onBack = { navController.popBackStack() },
+                        onBuy = { skinId -> scope.launch { repository.buySkin(skinId) } },
+                        onSelect = { skinId -> scope.launch { repository.setActiveSkin(skinId) } }
                     )
                 }
 
